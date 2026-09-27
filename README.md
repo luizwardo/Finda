@@ -1,8 +1,8 @@
 # Finda
 
-Aplicação distribuída de busca de rotas (estilo mapa): cliente gráfico em Fyne consulta **2 servidores** (Dijkstra e A*) via sockets/JSON, anima a expansão do grafo e destaca a melhor rota.
+**Distributed route-finding app (map-style):** a Fyne GUI client queries **2 servers** (Dijkstra and A*) over sockets/JSON, animates the graph expansion, and highlights the best route.
 
-## Rodar
+## Run
 
 ```bash
 # dependências Fyne (Fedora) — uma vez
