@@ -6,7 +6,7 @@ servers:
 	@echo "Dijkstra :9001  |  A* :9002"
 
 client:
-	CGO_ENABLED=1 go run ./cmd/client
+	CGO_ENABLED=1 go run -tags x11 ./cmd/client
 
 test:
 	CGO_ENABLED=0 go test ./...
@@ -14,4 +14,5 @@ test:
 # Fedora/RHEL — run once (needs sudo password in your terminal):
 deps:
 	sudo dnf install -y gcc libX11-devel libXcursor-devel libXrandr-devel \
-		libXinerama-devel libXi-devel libXxf86vm-devel libglvnd-devel mesa-libGL-devel
+		libXinerama-devel libXi-devel libXxf86vm-devel libglvnd-devel mesa-libGL-devel \
+		wayland-devel libxkbcommon-devel
