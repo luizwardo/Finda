@@ -14,13 +14,16 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/wrdo/FInda/internal/graph"
+	"github.com/wrdo/FInda/internal/pathfind"
 	"github.com/wrdo/FInda/internal/protocol"
 )
 
 const (
 	addrDijkstra = "127.0.0.1:9001"
 	addrAStar    = "127.0.0.1:9002"
-	animStep     = 55 * time.Millisecond
+	// Each settled node takes this long, drawn as a stroke traveling the road.
+	animStep  = 500 * time.Millisecond
+	animFrame = 25 * time.Millisecond
 )
 
 func main() {
@@ -116,15 +119,16 @@ func main() {
 				status.SetText("Animando expansão das buscas…")
 			})
 
-			animate(mapView, dijk, astar, errD, errA)
+			animate(mapView, status, dijk, astar, errD, errA)
 
 			winner := pickWinner(dijk, astar, errD, errA)
+			if winner != nil {
+				fyne.Do(func() {
+					status.SetText("Desenhando a melhor rota…")
+				})
+				animateRoute(mapView, winner.Path)
+			}
 			fyne.Do(func() {
-				if winner == nil {
-					status.SetText(formatStatus(dijk, astar, errD, errA, nil))
-					return
-				}
-				mapView.SetPath(winner.Path)
 				status.SetText(formatStatus(dijk, astar, errD, errA, winner))
 			})
 		}()
@@ -156,8 +160,7 @@ func legendSwatch(label string, c color.Color) fyne.CanvasObject {
 	return container.NewHBox(box, widget.NewLabel(label), layout.NewSpacer())
 }
 
-func animate(m *MapView, dijk, astar protocol.Response, errD, errA error) {
-	var i, j int
+func animate(m *MapView, status *widget.Label, dijk, astar protocol.Response, errD, errA error) {
 	stepsD := dijk.Steps
 	stepsA := astar.Steps
 	if errD != nil {
@@ -166,20 +169,78 @@ func animate(m *MapView, dijk, astar protocol.Response, errD, errA error) {
 	if errA != nil {
 		stepsA = nil
 	}
+	totalD, totalA := len(stepsD), len(stepsA)
 
-	for i < len(stepsD) || j < len(stepsA) {
-		if i < len(stepsD) {
-			node := stepsD[i].Node
-			fyne.Do(func() { m.MarkDijkstra(node) })
+	var i, j int
+	for i < totalD || j < totalA {
+		var stepD, stepA *pathfind.Step
+		var captionD, captionA string
+		if i < totalD {
+			s := stepsD[i]
 			i++
+			stepD = &s
+			captionD = stepCaption("Dijkstra", i, totalD, s, m)
+		} else if errD != nil {
+			captionD = fmt.Sprintf("Dijkstra: offline (%v)", errD)
+		} else {
+			captionD = fmt.Sprintf("Dijkstra: concluído · %d passos", totalD)
 		}
-		if j < len(stepsA) {
-			node := stepsA[j].Node
-			fyne.Do(func() { m.MarkAStar(node) })
+		if j < totalA {
+			s := stepsA[j]
 			j++
+			stepA = &s
+			captionA = stepCaption("A*", j, totalA, s, m)
+		} else if errA != nil {
+			captionA = fmt.Sprintf("A*: offline (%v)", errA)
+		} else {
+			captionA = fmt.Sprintf("A*: concluído · %d passos", totalA)
 		}
-		time.Sleep(animStep)
+
+		text := captionD + "\n" + captionA
+		frames := animFrames()
+		for f := 1; f <= frames; f++ {
+			progress := float32(f) / float32(frames)
+			fyne.Do(func() {
+				m.SetTravels(stepD, stepA, progress)
+				status.SetText(text)
+			})
+			time.Sleep(animFrame)
+		}
+		fyne.Do(func() { m.CommitTravels() })
 	}
+}
+
+func animFrames() int {
+	n := int(animStep / animFrame)
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func animateRoute(m *MapView, path []string) {
+	if len(path) == 0 {
+		return
+	}
+	fyne.Do(func() { m.BeginRoute(path[0]) })
+	for i := 1; i < len(path); i++ {
+		from, to := path[i-1], path[i]
+		frames := animFrames()
+		for f := 1; f <= frames; f++ {
+			progress := float32(f) / float32(frames)
+			fyne.Do(func() { m.SetPathSweep(from, to, progress) })
+			time.Sleep(animFrame)
+		}
+		fyne.Do(func() { m.CommitPathSweep() })
+	}
+}
+
+func stepCaption(name string, n, total int, step pathfind.Step, m *MapView) string {
+	here := m.NodeName(step.Node)
+	if step.From == "" {
+		return fmt.Sprintf("%s · passo %d/%d · parte de %s", name, n, total, here)
+	}
+	return fmt.Sprintf("%s · passo %d/%d · %s ← %s", name, n, total, here, m.NodeName(step.From))
 }
 
 func pickWinner(dijk, astar protocol.Response, errD, errA error) *protocol.Response {
