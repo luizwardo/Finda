@@ -3,7 +3,9 @@ package main
 import (
 	"image/color"
 	"math"
+	"sort"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -11,19 +13,6 @@ import (
 
 	"github.com/wrdo/FInda/internal/graph"
 	"github.com/wrdo/FInda/internal/pathfind"
-)
-
-var (
-	colBG       = color.NRGBA{R: 18, G: 24, B: 38, A: 255}
-	colRoad     = color.NRGBA{R: 70, G: 85, B: 110, A: 255}
-	colNode     = color.NRGBA{R: 200, G: 210, B: 230, A: 255}
-	colDijkstra = color.NRGBA{R: 56, G: 189, B: 248, A: 220}  // cyan
-	colAStar    = color.NRGBA{R: 251, G: 146, B: 60, A: 220}  // orange
-	colBoth     = color.NRGBA{R: 192, G: 132, B: 252, A: 230} // violet (overlap)
-	colPath     = color.NRGBA{R: 74, G: 222, B: 128, A: 255}  // green
-	colStart    = color.NRGBA{R: 52, G: 211, B: 153, A: 255}
-	colEnd      = color.NRGBA{R: 248, G: 113, B: 113, A: 255}
-	colLabel    = color.NRGBA{R: 226, G: 232, B: 240, A: 255}
 )
 
 // MapView draws the city graph and animates search expansion.
@@ -39,11 +28,15 @@ type MapView struct {
 	astarEdge   map[[2]string]bool
 	curDijk     string
 	curAStar    string
-	dijkTravel  *travel
-	astarTravel *travel
+	dijkTravel  []*travel
+	astarTravel []*travel
 	pathTravel  *travel
 	pathSet     map[string]bool
 	pathEdge    map[[2]string]bool
+	onHit       func(hit mapHit)
+	selEdge     [2]string
+	selPulse    float32
+	hasSelEdge  bool
 }
 
 // travel is a stroke still moving from one node to the next. t is 0..1.
@@ -73,6 +66,76 @@ func (m *MapView) CreateRenderer() fyne.WidgetRenderer {
 
 func (m *MapView) MinSize() fyne.Size { return fyne.NewSize(900, 580) }
 
+// SetOnHit registers the callback after a place or road is clicked.
+func (m *MapView) SetOnHit(fn func(hit mapHit)) {
+	m.onHit = fn
+}
+
+// Tapped selects a road (or place) and asks the app which server should leave from there.
+func (m *MapView) Tapped(e *fyne.PointEvent) {
+	if m.onHit == nil || e == nil {
+		return
+	}
+	hit := m.hitAt(e.Position)
+	if hit.Place == "" {
+		return
+	}
+	m.onHit(hit)
+}
+
+func (m *MapView) hitAt(at fyne.Position) mapHit {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return hitTarget(m.g, m.Size(), at)
+}
+
+// PulseEdge grows a selected road once over ~0.4s.
+func (m *MapView) PulseEdge(a, b string) {
+	if a == "" || b == "" {
+		return
+	}
+	key := edgeKey(a, b)
+	m.mu.Lock()
+	m.selEdge = key
+	m.hasSelEdge = true
+	m.selPulse = 0
+	m.mu.Unlock()
+
+	const total = 400 * time.Millisecond
+	const frame = 40 * time.Millisecond
+	start := time.Now()
+	for {
+		elapsed := time.Since(start)
+		if elapsed >= total {
+			break
+		}
+		t := float32(elapsed) / float32(total)
+		m.mu.Lock()
+		m.selPulse = easeOutCubic(t)
+		m.mu.Unlock()
+		fyne.DoAndWait(func() { m.Refresh() })
+		time.Sleep(frame)
+	}
+	m.mu.Lock()
+	m.selPulse = 1
+	m.mu.Unlock()
+	fyne.DoAndWait(func() { m.Refresh() })
+}
+
+func easeOutCubic(t float32) float32 {
+	u := 1 - clamp01(t)
+	return 1 - u*u*u
+}
+
+func (m *MapView) ClearEdgePulse() {
+	m.mu.Lock()
+	m.hasSelEdge = false
+	m.selPulse = 0
+	m.selEdge = [2]string{}
+	m.mu.Unlock()
+	m.Refresh()
+}
+
 func (m *MapView) SetEndpoints(from, to string) {
 	m.mu.Lock()
 	m.from, m.to = from, to
@@ -90,46 +153,82 @@ func (m *MapView) ResetExploration() {
 	m.dijkTravel, m.astarTravel, m.pathTravel = nil, nil, nil
 	m.pathSet = make(map[string]bool)
 	m.pathEdge = make(map[[2]string]bool)
+	m.hasSelEdge = false
+	m.selPulse = 0
+	m.selEdge = [2]string{}
 	m.mu.Unlock()
 	m.Refresh()
 }
 
-// SetTravels moves each server's stroke along the road it is currently crossing.
-// A nil step means that server has already finished. t runs from 0 to 1.
-func (m *MapView) SetTravels(dijk, astar *pathfind.Step, t float32) {
+// RoadLength is the map distance of a road, used to keep the search stroke at a steady speed.
+func (m *MapView) RoadLength(from, to string) float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	a, okA := m.g.Nodes[from]
+	b, okB := m.g.Nodes[to]
+	if !okA || !okB {
+		return 1
+	}
+	d := graph.Euclidean(a.X, a.Y, b.X, b.Y)
+	if d < 1 {
+		return 1
+	}
+	return d
+}
+
+// SetSearchWave commits settled roads and draws every in-flight frontier stroke.
+func (m *MapView) SetSearchWave(originD, originA string, doneD, doneA []pathfind.Step, activeD, activeA []activeTravel) {
 	m.mu.Lock()
-	m.dijkTravel = travelFrom(dijk, t)
-	m.astarTravel = travelFrom(astar, t)
+	if originD != "" {
+		m.dijk[originD] = true
+		m.curDijk = originD
+	}
+	if originA != "" {
+		m.astar[originA] = true
+		m.curAStar = originA
+	}
+	for _, s := range doneD {
+		commitStep(m.dijk, m.dijkEdge, &m.curDijk, s)
+	}
+	for _, s := range doneA {
+		commitStep(m.astar, m.astarEdge, &m.curAStar, s)
+	}
+	m.dijkTravel = travelsFrom(activeD)
+	m.astarTravel = travelsFrom(activeA)
 	m.mu.Unlock()
 	m.Refresh()
 }
 
-// CommitTravels keeps the nodes and roads once the stroke has arrived.
-func (m *MapView) CommitTravels() {
-	m.mu.Lock()
-	commitTravel(m.dijk, m.dijkEdge, &m.curDijk, m.dijkTravel)
-	commitTravel(m.astar, m.astarEdge, &m.curAStar, m.astarTravel)
-	m.dijkTravel, m.astarTravel = nil, nil
-	m.mu.Unlock()
-	m.Refresh()
-}
-
-func travelFrom(step *pathfind.Step, t float32) *travel {
-	if step == nil {
+func travelsFrom(active []activeTravel) []*travel {
+	if len(active) == 0 {
 		return nil
 	}
-	return &travel{from: step.From, node: step.Node, t: smooth(t)}
+	out := make([]*travel, 0, len(active))
+	for _, a := range active {
+		if a.step.From == "" {
+			continue
+		}
+		out = append(out, &travel{from: a.step.From, node: a.step.Node, t: clamp01(a.t)})
+	}
+	return out
 }
 
-func commitTravel(seen map[string]bool, edges map[[2]string]bool, current *string, tr *travel) {
-	if tr == nil {
-		return
+func commitStep(seen map[string]bool, edges map[[2]string]bool, current *string, s pathfind.Step) {
+	seen[s.Node] = true
+	*current = s.Node
+	if s.From != "" {
+		edges[edgeKey(s.From, s.Node)] = true
 	}
-	seen[tr.node] = true
-	*current = tr.node
-	if tr.from != "" {
-		edges[edgeKey(tr.from, tr.node)] = true
+}
+
+func clamp01(t float32) float32 {
+	if t < 0 {
+		return 0
 	}
+	if t > 1 {
+		return 1
+	}
+	return t
 }
 
 func smooth(t float32) float32 {
@@ -225,17 +324,23 @@ func (r *mapRenderer) rebuild(size fyne.Size) {
 		return
 	}
 
-	sx := size.Width / 900
-	sy := size.Height / 580
-	scale := float32(math.Min(float64(sx), float64(sy)))
-	ox := (size.Width - 900*scale) / 2
-	oy := (size.Height - 580*scale) / 2
+	scale, ox, oy, ok := mapTransform(size)
+	if !ok {
+		r.objects = objs
+		return
+	}
 
 	pos := func(n graph.Node) fyne.Position {
 		return fyne.NewPos(ox+n.X*scale, oy+n.Y*scale)
 	}
 
-	// Roads
+	// Stable order: Go maps shuffle each rebuild and made the graph look jumpy.
+	type road struct {
+		key    [2]string
+		a, b   string
+		pa, pb fyne.Position
+	}
+	roads := make([]road, 0, len(r.m.g.Adj)*2)
 	seen := make(map[[2]string]bool)
 	for from, nbs := range r.m.g.Adj {
 		for _, nb := range nbs {
@@ -244,53 +349,68 @@ func (r *mapRenderer) rebuild(size fyne.Size) {
 				continue
 			}
 			seen[key] = true
-			a, b := r.m.g.Nodes[from], r.m.g.Nodes[nb.ID]
-			pa, pb := pos(a), pos(b)
-			line := canvas.NewLine(colRoad)
-			line.StrokeWidth = 3 * scale
-			if r.m.pathEdge[key] {
-				line.StrokeColor = colPath
-				line.StrokeWidth = 6 * scale
-			}
-			line.Position1 = pa
-			line.Position2 = pb
-			objs = append(objs, line)
+			// Always draw key[0] → key[1] so blue/orange sides never flip.
+			a, b := r.m.g.Nodes[key[0]], r.m.g.Nodes[key[1]]
+			roads = append(roads, road{key: key, a: key[0], b: key[1], pa: pos(a), pb: pos(b)})
+		}
+	}
+	sort.Slice(roads, func(i, j int) bool {
+		if roads[i].key[0] != roads[j].key[0] {
+			return roads[i].key[0] < roads[j].key[0]
+		}
+		return roads[i].key[1] < roads[j].key[1]
+	})
 
-			// Finished search-tree roads sit beside the street so both algorithms stay visible.
-			if r.m.dijkEdge[key] {
-				objs = append(objs, offsetLine(pa, pb, 4*scale, 2.5*scale, colDijkstra))
-			}
-			if r.m.astarEdge[key] {
-				objs = append(objs, offsetLine(pa, pb, -4*scale, 2.5*scale, colAStar))
-			}
+	const side = float32(4.5)
+	for _, rd := range roads {
+		selected := r.m.hasSelEdge && r.m.selEdge == rd.key
+		objs = appendDepthRoad(objs, rd.pa, rd.pb, scale, r.m.selPulse, r.m.pathEdge[rd.key], selected)
+		if r.m.dijkEdge[rd.key] {
+			objs = append(objs, offsetLine(rd.pa, rd.pb, side*scale, 2*scale, colDijkstra))
+		}
+		if r.m.astarEdge[rd.key] {
+			objs = append(objs, offsetLine(rd.pa, rd.pb, -side*scale, 2*scale, colAStar))
 		}
 	}
 
-	// Strokes still traveling toward the next node.
-	if line := travelLine(r.m.g.Nodes, pos, r.m.dijkTravel, 4*scale, 2.5*scale, colDijkstra); line != nil {
-		objs = append(objs, line)
+	for _, tr := range r.m.dijkTravel {
+		if line := travelLine(r.m.g.Nodes, pos, tr, sideAmount(tr, side)*scale, 2*scale, colDijkstra); line != nil {
+			objs = append(objs, line)
+		}
 	}
-	if line := travelLine(r.m.g.Nodes, pos, r.m.astarTravel, -4*scale, 2.5*scale, colAStar); line != nil {
-		objs = append(objs, line)
+	for _, tr := range r.m.astarTravel {
+		if line := travelLine(r.m.g.Nodes, pos, tr, sideAmount(tr, -side)*scale, 2*scale, colAStar); line != nil {
+			objs = append(objs, line)
+		}
 	}
-	if line := travelLine(r.m.g.Nodes, pos, r.m.pathTravel, 0, 6*scale, colPath); line != nil {
+	if line := travelLine(r.m.g.Nodes, pos, r.m.pathTravel, 0, 4.5*scale, colPath); line != nil {
 		objs = append(objs, line)
 	}
 
-	// Nodes
-	for id, n := range r.m.g.Nodes {
+	ids := make([]string, 0, len(r.m.g.Nodes))
+	for id := range r.m.g.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		n := r.m.g.Nodes[id]
 		p := pos(n)
-		radius := float32(14) * scale
+		radius := float32(6.5) * scale
 		fill := colNode
+		strong := false
 		switch {
 		case id == r.m.from:
-			fill = colStart
-			radius = 18 * scale
+			fill = colDijkstra
+			radius = 9.5 * scale
+			strong = true
 		case id == r.m.to:
-			fill = colEnd
-			radius = 18 * scale
+			fill = colAStar
+			radius = 9.5 * scale
+			strong = true
 		case r.m.pathSet[id]:
 			fill = colPath
+			strong = true
 		case r.m.dijk[id] && r.m.astar[id]:
 			fill = colBoth
 		case r.m.dijk[id]:
@@ -299,38 +419,29 @@ func (r *mapRenderer) rebuild(size fyne.Size) {
 			fill = colAStar
 		}
 
-		circle := canvas.NewCircle(fill)
-		circle.Resize(fyne.NewSize(radius*2, radius*2))
-		circle.Move(fyne.NewPos(p.X-radius, p.Y-radius))
-		circle.StrokeColor = color.NRGBA{R: 15, G: 20, B: 30, A: 255}
-		circle.StrokeWidth = 2
-
-		label := canvas.NewText(n.Name, colLabel)
-		label.TextSize = 11 * scale
-		label.Alignment = fyne.TextAlignCenter
-		label.Move(fyne.NewPos(p.X-60*scale, p.Y+radius+2))
-		label.Resize(fyne.NewSize(120*scale, 16*scale))
-
-		objs = append(objs, circle)
+		objs = appendDepthNode(objs, n.Name, p, scale, fill, radius, strong)
 		if disc := r.growingFill(id, p, radius); disc != nil {
 			objs = append(objs, disc)
 		}
 		if id == r.m.curDijk {
-			objs = append(objs, nodeRing(p, radius+7*scale, 3*scale, colDijkstra))
+			objs = append(objs, nodeRing(p, radius+5*scale, 2.2*scale, colDijkstra))
 		}
 		if id == r.m.curAStar {
-			objs = append(objs, nodeRing(p, radius+12*scale, 3*scale, colAStar))
+			objs = append(objs, nodeRing(p, radius+8*scale, 2.2*scale, colAStar))
 		}
-		if dot := travelHead(r.m.g.Nodes, pos, r.m.dijkTravel, id, 4*scale, 5*scale, colDijkstra); dot != nil {
+		for _, tr := range r.m.dijkTravel {
+			if dot := travelHead(r.m.g.Nodes, pos, tr, id, sideAmount(tr, side)*scale, 2.5*scale, colDijkstra); dot != nil {
+				objs = append(objs, dot)
+			}
+		}
+		for _, tr := range r.m.astarTravel {
+			if dot := travelHead(r.m.g.Nodes, pos, tr, id, sideAmount(tr, -side)*scale, 2.5*scale, colAStar); dot != nil {
+				objs = append(objs, dot)
+			}
+		}
+		if dot := travelHead(r.m.g.Nodes, pos, r.m.pathTravel, id, 0, 3*scale, colPath); dot != nil {
 			objs = append(objs, dot)
 		}
-		if dot := travelHead(r.m.g.Nodes, pos, r.m.astarTravel, id, -4*scale, 5*scale, colAStar); dot != nil {
-			objs = append(objs, dot)
-		}
-		if dot := travelHead(r.m.g.Nodes, pos, r.m.pathTravel, id, 0, 7*scale, colPath); dot != nil {
-			objs = append(objs, dot)
-		}
-		objs = append(objs, label)
 	}
 
 	r.objects = objs
@@ -342,6 +453,20 @@ func offsetLine(a, b fyne.Position, amount, width float32, c color.Color) *canva
 	line.Position1 = offsetPoint(a, b, 0, amount)
 	line.Position2 = offsetPoint(a, b, 1, amount)
 	return line
+}
+
+// sideAmount keeps each algorithm on a fixed geometric side of the road.
+// side is relative to the canonical edgeKey(from,to) direction (sorted IDs).
+// Traveling against that direction flips the signed offset so the stroke stays put.
+func sideAmount(tr *travel, side float32) float32 {
+	if tr == nil || tr.from == "" || tr.node == "" {
+		return side
+	}
+	key := edgeKey(tr.from, tr.node)
+	if tr.from == key[0] {
+		return side
+	}
+	return -side
 }
 
 func offsetPoint(a, b fyne.Position, t, amount float32) fyne.Position {
@@ -382,7 +507,7 @@ func travelHead(nodes map[string]graph.Node, pos func(graph.Node) fyne.Position,
 }
 
 func travelEnds(nodes map[string]graph.Node, pos func(graph.Node) fyne.Position, tr *travel) (fyne.Position, fyne.Position, bool) {
-	if tr == nil || tr.from == "" || tr.t <= 0 {
+	if tr == nil || tr.from == "" || tr.t < 0 {
 		return fyne.Position{}, fyne.Position{}, false
 	}
 	a, okA := nodes[tr.from]
@@ -405,31 +530,47 @@ func (r *mapRenderer) growingFill(id string, center fyne.Position, radius float3
 }
 
 func (r *mapRenderer) fillProgress(id string) (color.Color, float32, bool) {
-	d, a, p := r.m.dijkTravel, r.m.astarTravel, r.m.pathTravel
-	dHit := d != nil && d.node == id
-	aHit := a != nil && a.node == id
-	pHit := p != nil && p.node == id
-	switch {
-	case pHit:
+	if p := r.m.pathTravel; p != nil && p.node == id {
 		return colPath, arrive(p.t), true
-	case dHit && aHit:
-		t := d.t
-		if a.t > t {
-			t = a.t
+	}
+	var bestD, bestA float32
+	var hitD, hitA bool
+	for _, tr := range r.m.dijkTravel {
+		if tr != nil && tr.node == id {
+			hitD = true
+			if tr.t > bestD {
+				bestD = tr.t
+			}
+		}
+	}
+	for _, tr := range r.m.astarTravel {
+		if tr != nil && tr.node == id {
+			hitA = true
+			if tr.t > bestA {
+				bestA = tr.t
+			}
+		}
+	}
+	switch {
+	case hitD && hitA:
+		t := bestD
+		if bestA > t {
+			t = bestA
 		}
 		return colBoth, arrive(t), true
-	case dHit:
-		return colDijkstra, arrive(d.t), true
-	case aHit:
-		return colAStar, arrive(a.t), true
+	case hitD:
+		return colDijkstra, arrive(bestD), true
+	case hitA:
+		return colAStar, arrive(bestA), true
 	default:
 		return nil, 0, false
 	}
 }
 
 // arrive holds the node empty until the stroke is close, then fills it.
+// The fill used to occupy the last 45% of the approach; that phase is 25% longer.
 func arrive(t float32) float32 {
-	const start = float32(0.55)
+	const start = float32(0.4375) // 1 - 0.45*1.25
 	if t <= start {
 		return 0
 	}

@@ -20,9 +20,13 @@ func main() {
 		log.Fatalf("unknown algo %q (use dijkstra or astar)", *algo)
 	}
 
+	city := graph.DijkstraMap()
+	if *algo == protocol.AlgoAStar {
+		city = graph.AStarMap()
+	}
 	h := &server.Handler{
 		Algo: *algo,
-		Map:  graph.CityMap(),
+		Map:  city,
 	}
 	log.Fatal(h.ListenAndServe(*addr))
 }

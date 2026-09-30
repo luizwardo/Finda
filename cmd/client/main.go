@@ -21,7 +21,7 @@ import (
 const (
 	addrDijkstra = "127.0.0.1:9001"
 	addrAStar    = "127.0.0.1:9002"
-	// Each settled node takes this long, drawn as a stroke traveling the road.
+	// Average time to cross one road. Longer roads take longer, so the stroke keeps a steady speed.
 	animStep  = 500 * time.Millisecond
 	animFrame = 25 * time.Millisecond
 )
@@ -29,26 +29,95 @@ const (
 func main() {
 	a := app.NewWithID("finda.pathfinder")
 	w := a.NewWindow("FInda — Rotas Distribuídas")
-	w.Resize(fyne.NewSize(980, 720))
+	w.Resize(fyne.NewSize(1180, 760))
 
 	city := graph.CityMap()
 	mapView := NewMapView(city)
 
-	labels, idByLabel := graph.LabelsForSelect(city)
-	fromSel := widget.NewSelect(labels, nil)
-	toSel := widget.NewSelect(labels, nil)
-	if len(labels) >= 2 {
-		fromSel.SetSelected(labels[0])
-		toSel.SetSelected(labels[len(labels)-1])
-		mapView.SetEndpoints(idByLabel[labels[0]], idByLabel[labels[len(labels)-1]])
-	}
-	fromSel.OnChanged = func(string) {
-		mapView.SetEndpoints(idByLabel[fromSel.Selected], idByLabel[toSel.Selected])
-	}
-	toSel.OnChanged = fromSel.OnChanged
+	ids := city.NodeIDs()
+	dijkFrom, astarFrom := ids[0], ids[len(ids)-1]
+	mapView.SetEndpoints(dijkFrom, astarFrom)
 
-	status := widget.NewLabel("Escolha origem e destino, depois busque a rota nos 2 servidores.")
+	dijkName := widget.NewLabel("")
+	astarName := widget.NewLabel("")
+	status := widget.NewLabel("Clique numa rua (ou num lugar). Depois escolha Dijkstra ou A* no popup.")
 	status.Wrapping = fyne.TextWrapWord
+	showDepartures := func() {
+		dijkName.SetText(departLabel("Dijkstra", mapView, dijkFrom))
+		astarName.SetText(departLabel("A*", mapView, astarFrom))
+	}
+	showDepartures()
+
+	var picking sync.Mutex
+	mapView.SetOnHit(func(hit mapHit) {
+		if !picking.TryLock() {
+			return
+		}
+		go func() {
+			defer picking.Unlock()
+			if hit.OnEdge {
+				mapView.PulseEdge(hit.EdgeA, hit.EdgeB)
+			} else {
+				mapView.ClearEdgePulse()
+			}
+
+			place := hit.Place
+			title := "Saída em " + mapView.NodeName(place)
+			detail := "Escolha qual servidor sai daqui."
+			if hit.OnEdge {
+				detail = "Rua " + mapView.NodeName(hit.EdgeA) + " ↔ " + mapView.NodeName(hit.EdgeB) +
+					"\nPonto mais próximo: " + mapView.NodeName(place)
+			}
+
+			fyne.DoAndWait(func() {
+				body := widget.NewLabel(detail)
+				body.Wrapping = fyne.TextWrapWord
+				dijkBtn := widget.NewButton("Dijkstra", nil)
+				dijkBtn.Importance = widget.HighImportance
+				astarBtn := widget.NewButton("A*", nil)
+				astarBtn.Importance = widget.WarningImportance
+				cancelBtn := widget.NewButton("Cancelar", nil)
+
+				content := container.NewVBox(
+					widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+					body,
+					container.NewGridWithColumns(2, dijkBtn, astarBtn),
+					cancelBtn,
+				)
+				pop := widget.NewModalPopUp(container.NewPadded(content), w.Canvas())
+				pop.Resize(fyne.NewSize(360, 190))
+
+				assign := func(server string) {
+					if server == "A*" {
+						astarFrom = place
+						if dijkFrom == place {
+							dijkFrom = ""
+						}
+					} else {
+						dijkFrom = place
+						if astarFrom == place {
+							astarFrom = ""
+						}
+					}
+					mapView.SetEndpoints(dijkFrom, astarFrom)
+					showDepartures()
+					status.SetText(departLabel(server, mapView, place) + ". Clique em outra rua para o outro servidor.")
+					pop.Hide()
+				}
+				dijkBtn.OnTapped = func() { assign("Dijkstra") }
+				astarBtn.OnTapped = func() { assign("A*") }
+				cancelBtn.OnTapped = func() {
+					mapView.ClearEdgePulse()
+					pop.Hide()
+				}
+				pop.Show()
+			})
+		}()
+	})
+
+	backlogBody := widget.NewLabel("Nenhuma busca ainda.")
+	backlogBody.Wrapping = fyne.TextWrapWord
+	backlog := &searchLog{label: backlogBody}
 
 	legendDijkstra := legendSwatch("Dijkstra (expansão)", colDijkstra)
 	legendAStar := legendSwatch("A* (expansão)", colAStar)
@@ -56,18 +125,16 @@ func main() {
 	legendPath := legendSwatch("Melhor rota", colPath)
 
 	var searching sync.Mutex
-	btn := widget.NewButton("Buscar rota (2 servidores)", nil)
+	btn := widget.NewButton("Encontrar um ao outro", nil)
 	btn.Importance = widget.HighImportance
 
 	btn.OnTapped = func() {
-		from := idByLabel[fromSel.Selected]
-		to := idByLabel[toSel.Selected]
-		if from == "" || to == "" {
-			status.SetText("Selecione origem e destino.")
+		if dijkFrom == "" || astarFrom == "" {
+			status.SetText("Clique no mapa para marcar a saída de cada servidor.")
 			return
 		}
-		if from == to {
-			status.SetText("Origem e destino devem ser diferentes.")
+		if dijkFrom == astarFrom {
+			status.SetText("Dijkstra e A* precisam sair de lugares diferentes.")
 			return
 		}
 		if !searching.TryLock() {
@@ -75,12 +142,12 @@ func main() {
 		}
 		btn.Disable()
 		mapView.ResetExploration()
-		mapView.SetEndpoints(from, to)
-		status.SetText("Consultando servidores Dijkstra (:9001) e A* (:9002)…")
+		mapView.SetEndpoints(dijkFrom, astarFrom)
+		status.SetText("Dijkstra busca o A* e o A* busca o Dijkstra…")
 
 		go func() {
 			defer searching.Unlock()
-			defer btn.Enable()
+			defer fyne.Do(func() { btn.Enable() })
 
 			type outcome struct {
 				resp protocol.Response
@@ -89,11 +156,11 @@ func main() {
 			}
 			ch := make(chan outcome, 2)
 			go func() {
-				r, e := queryServer(addrDijkstra, from, to, 3*time.Second)
+				r, e := queryServer(addrDijkstra, dijkFrom, astarFrom, 3*time.Second)
 				ch <- outcome{r, e, "dijkstra"}
 			}()
 			go func() {
-				r, e := queryServer(addrAStar, from, to, 3*time.Second)
+				r, e := queryServer(addrAStar, astarFrom, dijkFrom, 3*time.Second)
 				ch <- outcome{r, e, "astar"}
 			}()
 
@@ -108,12 +175,15 @@ func main() {
 				}
 			}
 
+			entry := formatBacklog(time.Now(), mapView, dijkFrom, astarFrom, dijk, astar, errD, errA)
 			if errD != nil && errA != nil {
 				fyne.Do(func() {
 					status.SetText(fmt.Sprintf("Falha nos dois servidores.\nDijkstra: %v\nA*: %v", errD, errA))
+					backlog.prepend(entry)
 				})
 				return
 			}
+			fyne.Do(func() { backlog.prepend(entry) })
 
 			fyne.Do(func() {
 				status.SetText("Animando expansão das buscas…")
@@ -136,22 +206,38 @@ func main() {
 
 	controls := container.NewVBox(
 		widget.NewLabelWithStyle("FInda", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Mapa da cidade · carga distribuída em 2 servidores"),
-		container.NewGridWithColumns(2,
-			container.NewVBox(widget.NewLabel("Origem"), fromSel),
-			container.NewVBox(widget.NewLabel("Destino"), toSel),
-		),
+		widget.NewLabel("Clique numa rua; o popup pergunta qual servidor sai dali."),
+		container.NewGridWithColumns(2, dijkName, astarName),
 		btn,
 		container.NewHBox(legendDijkstra, legendAStar, legendBoth, legendPath),
 		status,
 	)
 
+	backlogScroll := container.NewVScroll(backlogBody)
+	backlogPanel := container.NewBorder(
+		container.NewVBox(
+			widget.NewLabelWithStyle("Backlog", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabel("Tempo de cada um para alcançar o outro."),
+		),
+		nil, nil, nil,
+		backlogScroll,
+	)
+	split := container.NewHSplit(container.NewPadded(mapView), container.NewPadded(backlogPanel))
+	split.SetOffset(0.68)
+
 	w.SetContent(container.NewBorder(
 		container.NewPadded(controls),
 		nil, nil, nil,
-		container.NewPadded(mapView),
+		split,
 	))
 	w.ShowAndRun()
+}
+
+func departLabel(server string, m *MapView, id string) string {
+	if id == "" {
+		return server + ": clique numa rua"
+	}
+	return server + " sai de " + m.NodeName(id)
 }
 
 func legendSwatch(label string, c color.Color) fyne.CanvasObject {
@@ -169,44 +255,35 @@ func animate(m *MapView, status *widget.Label, dijk, astar protocol.Response, er
 	if errA != nil {
 		stepsA = nil
 	}
-	totalD, totalA := len(stepsD), len(stepsA)
+	total := waveDuration(m, stepsD, stepsA)
+	maxCost := maxStepCost(m, stepsD)
+	if a := maxStepCost(m, stepsA); a > maxCost {
+		maxCost = a
+	}
+	rate := costPerSec
+	if maxCost > 0 {
+		rate = maxCost / total.Seconds()
+	}
 
-	var i, j int
-	for i < totalD || j < totalA {
-		var stepD, stepA *pathfind.Step
-		var captionD, captionA string
-		if i < totalD {
-			s := stepsD[i]
-			i++
-			stepD = &s
-			captionD = stepCaption("Dijkstra", i, totalD, s, m)
-		} else if errD != nil {
-			captionD = fmt.Sprintf("Dijkstra: offline (%v)", errD)
-		} else {
-			captionD = fmt.Sprintf("Dijkstra: concluído · %d passos", totalD)
+	var elapsed time.Duration
+	for {
+		if elapsed > total {
+			elapsed = total
 		}
-		if j < totalA {
-			s := stepsA[j]
-			j++
-			stepA = &s
-			captionA = stepCaption("A*", j, totalA, s, m)
-		} else if errA != nil {
-			captionA = fmt.Sprintf("A*: offline (%v)", errA)
-		} else {
-			captionA = fmt.Sprintf("A*: concluído · %d passos", totalA)
+		costNow := rate * elapsed.Seconds()
+		originD, doneD, activeD := waveAt(m, stepsD, costNow)
+		originA, doneA, activeA := waveAt(m, stepsA, costNow)
+		text := waveCaption("Dijkstra", errD, originD, stepsD, doneD, activeD, m) + "\n" +
+			waveCaption("A*", errA, originA, stepsA, doneA, activeA, m)
+		fyne.Do(func() {
+			m.SetSearchWave(originD, originA, doneD, doneA, activeD, activeA)
+			status.SetText(text)
+		})
+		if elapsed >= total {
+			return
 		}
-
-		text := captionD + "\n" + captionA
-		frames := animFrames()
-		for f := 1; f <= frames; f++ {
-			progress := float32(f) / float32(frames)
-			fyne.Do(func() {
-				m.SetTravels(stepD, stepA, progress)
-				status.SetText(text)
-			})
-			time.Sleep(animFrame)
-		}
-		fyne.Do(func() { m.CommitTravels() })
+		time.Sleep(animFrame)
+		elapsed += animFrame
 	}
 }
 
@@ -269,11 +346,15 @@ func formatStatus(dijk, astar protocol.Response, errD, errA error, winner *proto
 		if !r.OK {
 			return fmt.Sprintf("%s: %s", name, r.Error)
 		}
-		return fmt.Sprintf("%s: custo %.1f · %d passos · rota %v", name, r.Cost, len(r.Steps), r.Path)
+		return fmt.Sprintf("%s: %s · custo %.1f · %d passos · rota %v", name, formatElapsed(r.ElapsedNs), r.Cost, len(r.Steps), r.Path)
 	}
 	msg := line("Dijkstra", dijk, errD) + "\n" + line("A*", astar, errA)
 	if winner != nil {
-		msg += fmt.Sprintf("\n→ Rota escolhida: %s (custo %.1f)", winner.Algorithm, winner.Cost)
+		name := "Dijkstra"
+		if winner.Algorithm == protocol.AlgoAStar {
+			name = "A*"
+		}
+		msg += fmt.Sprintf("\n→ Encontro pela rota do %s (custo %.1f)", name, winner.Cost)
 	}
 	return msg
 }

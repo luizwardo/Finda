@@ -26,4 +26,6 @@ type Response struct {
 	Path      []string         `json:"path,omitempty"`
 	Cost      float64          `json:"cost,omitempty"`
 	Steps     []pathfind.Step  `json:"steps,omitempty"`
+	// ElapsedNs is how long the server spent inside the path search.
+	ElapsedNs int64 `json:"elapsed_ns,omitempty"`
 }

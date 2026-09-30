@@ -9,8 +9,9 @@ import (
 
 // Step records one node settled during search (for client animation).
 type Step struct {
-	Node string `json:"node"`
-	From string `json:"from,omitempty"`
+	Node string  `json:"node"`
+	From string  `json:"from,omitempty"`
+	Cost float64 `json:"cost"` // g-score when settled; drives wavefront animation
 }
 
 // Result is a completed path search.
@@ -69,7 +70,7 @@ func search(g *graph.Graph, from, to string, useHeuristic bool) Result {
 		return Result{}
 	}
 	if from == to {
-		return Result{Path: []string{from}, Cost: 0, Steps: []Step{{Node: from}}}
+		return Result{Path: []string{from}, Cost: 0, Steps: []Step{{Node: from, Cost: 0}}}
 	}
 
 	dist := make(map[string]float64, len(g.Nodes))
@@ -93,7 +94,7 @@ func search(g *graph.Graph, from, to string, useHeuristic bool) Result {
 			continue
 		}
 		visited[u] = true
-		steps = append(steps, Step{Node: u, From: prev[u]})
+		steps = append(steps, Step{Node: u, From: prev[u], Cost: dist[u]})
 
 		if u == to {
 			break

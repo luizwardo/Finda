@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/wrdo/FInda/internal/graph"
 	"github.com/wrdo/FInda/internal/pathfind"
@@ -79,7 +80,14 @@ func (h *Handler) process(line string) protocol.Response {
 	if req.From == "" || req.To == "" {
 		return protocol.Response{OK: false, Error: "from/to required", Algorithm: h.Algo}
 	}
+	if _, ok := h.Map.Nodes[req.From]; !ok {
+		return protocol.Response{OK: false, Error: "unknown place: " + req.From, Algorithm: h.Algo, From: req.From, To: req.To}
+	}
+	if _, ok := h.Map.Nodes[req.To]; !ok {
+		return protocol.Response{OK: false, Error: "unknown place: " + req.To, Algorithm: h.Algo, From: req.From, To: req.To}
+	}
 
+	start := time.Now()
 	var result pathfind.Result
 	switch h.Algo {
 	case protocol.AlgoAStar:
@@ -87,6 +95,7 @@ func (h *Handler) process(line string) protocol.Response {
 	default:
 		result = pathfind.Dijkstra(h.Map, req.From, req.To)
 	}
+	elapsed := time.Since(start).Nanoseconds()
 
 	if len(result.Path) == 0 {
 		return protocol.Response{
@@ -96,6 +105,7 @@ func (h *Handler) process(line string) protocol.Response {
 			From:      req.From,
 			To:        req.To,
 			Steps:     result.Steps,
+			ElapsedNs: elapsed,
 		}
 	}
 
@@ -107,5 +117,6 @@ func (h *Handler) process(line string) protocol.Response {
 		Path:      result.Path,
 		Cost:      result.Cost,
 		Steps:     result.Steps,
+		ElapsedNs: elapsed,
 	}
 }

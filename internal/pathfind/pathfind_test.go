@@ -33,3 +33,25 @@ func TestDijkstraAndAStarReachAirport(t *testing.T) {
 	t.Logf("dijkstra cost=%.1f steps=%d path=%v", d.Cost, len(d.Steps), d.Path)
 	t.Logf("astar    cost=%.1f steps=%d path=%v", a.Cost, len(a.Steps), a.Path)
 }
+
+func TestServerMapsDisagreeOnAirportToUniversity(t *testing.T) {
+	dMap := graph.DijkstraMap()
+	aMap := graph.AStarMap()
+
+	dOnD := pathfind.Dijkstra(dMap, "AE", "UN")
+	aOnD := pathfind.AStar(dMap, "AE", "UN")
+	dOnA := pathfind.Dijkstra(aMap, "AE", "UN")
+	aOnA := pathfind.AStar(aMap, "AE", "UN")
+
+	if dOnD.Cost != aOnD.Cost {
+		t.Fatalf("Dijkstra map: algorithms disagree, dijkstra %.1f astar %.1f", dOnD.Cost, aOnD.Cost)
+	}
+	if dOnA.Cost != aOnA.Cost {
+		t.Fatalf("A* map: algorithms disagree, dijkstra %.1f astar %.1f", dOnA.Cost, aOnA.Cost)
+	}
+	if dOnD.Cost == dOnA.Cost {
+		t.Fatalf("both maps returned the same cost %.1f", dOnD.Cost)
+	}
+	t.Logf("dijkstra map cost=%.0f path=%v", dOnD.Cost, dOnD.Path)
+	t.Logf("astar map    cost=%.0f path=%v", dOnA.Cost, dOnA.Path)
+}
