@@ -11,9 +11,9 @@ import (
 	"github.com/wrdo/FInda/internal/protocol"
 )
 
-const maxBacklog = 12
+const maxBacklog = 4
 
-// searchLog keeps the newest searches at the top of the side panel.
+// searchLog keeps the newest searches at the top of the header backlog.
 type searchLog struct {
 	mu    sync.Mutex
 	items []string
@@ -27,74 +27,45 @@ func (s *searchLog) prepend(text string) {
 	if len(s.items) > maxBacklog {
 		s.items = s.items[:maxBacklog]
 	}
-	s.label.SetText(strings.Join(s.items, "\n\n"))
+	s.label.SetText(strings.Join(s.items, "\n"))
 }
 
-func formatBacklog(when time.Time, m *MapView, from, to string, dijk, astar protocol.Response, errD, errA error) string {
-	header := fmt.Sprintf("%s   Dijkstra sai de %s · A* sai de %s", when.Format("15:04:05"), m.NodeName(from), m.NodeName(to))
-	return header + "\n" +
-		backlogServerLine("Dijkstra", m, dijk, errD) + "\n" +
-		backlogServerLine("A*", m, astar, errA) + "\n" +
-		compareTimes(dijk, astar, errD, errA)
+func formatBacklog(_ time.Time, _ *MapView, _, _ string, dijk, astar protocol.Response, errD, errA error) string {
+	d := parseCost(dijk, errD)
+	a := parseCost(astar, errA)
+	return fmt.Sprintf("Dijkstra %s · A* %s · Total %s", formatCost(d), formatCost(a), formatTotal(d, a))
 }
 
-func backlogServerLine(name string, m *MapView, r protocol.Response, err error) string {
-	if err != nil {
-		return fmt.Sprintf("%s: offline (%v)", name, err)
+type maybeCost struct {
+	ok    bool
+	value float64
+}
+
+func parseCost(r protocol.Response, err error) maybeCost {
+	if err != nil || !r.OK {
+		return maybeCost{}
 	}
-	if !r.OK {
-		if r.ElapsedNs > 0 {
-			return fmt.Sprintf("%s: %s · %s", name, formatElapsed(r.ElapsedNs), r.Error)
-		}
-		return fmt.Sprintf("%s: %s", name, r.Error)
-	}
-	return fmt.Sprintf("%s: %s · custo %.1f · %d nós · %s",
-		name, formatElapsed(r.ElapsedNs), r.Cost, len(r.Steps), pathText(m, r.Path))
+	return maybeCost{ok: true, value: r.Cost}
 }
 
-func pathText(m *MapView, ids []string) string {
-	if len(ids) == 0 {
+func formatCost(c maybeCost) string {
+	if !c.ok {
 		return "—"
 	}
-	names := make([]string, len(ids))
-	for i, id := range ids {
-		names[i] = m.NodeName(id)
-	}
-	return strings.Join(names, " → ")
+	return fmt.Sprintf("%.1f", c.value)
 }
 
-func compareTimes(dijk, astar protocol.Response, errD, errA error) string {
-	okD := errD == nil && dijk.OK && dijk.ElapsedNs > 0
-	okA := errA == nil && astar.OK && astar.ElapsedNs > 0
+func formatTotal(d, a maybeCost) string {
 	switch {
-	case okD && okA:
-		return bothTimes(dijk, astar)
-	case okD:
-		return "Só o Dijkstra devolveu uma rota (" + formatElapsed(dijk.ElapsedNs) + ")."
-	case okA:
-		return "Só o A* devolveu uma rota (" + formatElapsed(astar.ElapsedNs) + ")."
+	case d.ok && a.ok:
+		return fmt.Sprintf("%.1f", d.value+a.value)
+	case d.ok:
+		return fmt.Sprintf("%.1f", d.value)
+	case a.ok:
+		return fmt.Sprintf("%.1f", a.value)
 	default:
-		return "Nenhum servidor devolveu uma rota."
+		return "—"
 	}
-}
-
-func bothTimes(dijk, astar protocol.Response) string {
-	cost := "Custo igual."
-	if dijk.Cost != astar.Cost {
-		cost = fmt.Sprintf("Custos diferentes (Dijkstra %.1f, A* %.1f).", dijk.Cost, astar.Cost)
-	}
-	if dijk.ElapsedNs == astar.ElapsedNs {
-		return fmt.Sprintf("Empate: os dois levaram %s. %s", formatElapsed(dijk.ElapsedNs), cost)
-	}
-	faster, slower := "A*", "Dijkstra"
-	fast, slow := astar.ElapsedNs, dijk.ElapsedNs
-	if dijk.ElapsedNs < astar.ElapsedNs {
-		faster, slower = "Dijkstra", "A*"
-		fast, slow = dijk.ElapsedNs, astar.ElapsedNs
-	}
-	ratio := float64(slow) / float64(fast)
-	return fmt.Sprintf("%s mais rápido: %s contra %s do %s (%.2f×). %s",
-		faster, formatElapsed(fast), formatElapsed(slow), slower, ratio, cost)
 }
 
 func formatElapsed(ns int64) string {

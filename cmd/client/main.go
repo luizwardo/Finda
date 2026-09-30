@@ -10,7 +10,6 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/wrdo/FInda/internal/graph"
@@ -116,16 +115,18 @@ func main() {
 	})
 
 	backlogBody := widget.NewLabel("Nenhuma busca ainda.")
-	backlogBody.Wrapping = fyne.TextWrapWord
+	backlogBody.Wrapping = fyne.TextWrapOff
 	backlog := &searchLog{label: backlogBody}
+	backlogScroll := container.NewVScroll(backlogBody)
+	backlogScroll.SetMinSize(fyne.NewSize(0, 44))
 
-	legendDijkstra := legendSwatch("Dijkstra (expansão)", colDijkstra)
-	legendAStar := legendSwatch("A* (expansão)", colAStar)
-	legendBoth := legendSwatch("Ambos exploraram", colBoth)
-	legendPath := legendSwatch("Melhor rota", colPath)
+	legendDijkstra := legendSwatch("Dijkstra", colDijkstra)
+	legendAStar := legendSwatch("A*", colAStar)
+	legendBoth := legendSwatch("Ambos", colBoth)
+	legendPath := legendSwatch("Rota", colPath)
 
 	var searching sync.Mutex
-	btn := widget.NewButton("Encontrar um ao outro", nil)
+	btn := widget.NewButton("Buscar", nil)
 	btn.Importance = widget.HighImportance
 
 	btn.OnTapped = func() {
@@ -205,30 +206,16 @@ func main() {
 	}
 
 	controls := container.NewVBox(
-		widget.NewLabelWithStyle("FInda", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Clique numa rua; o popup pergunta qual servidor sai dali."),
-		container.NewGridWithColumns(2, dijkName, astarName),
-		btn,
+		container.NewBorder(nil, nil, nil, btn, container.NewGridWithColumns(2, dijkName, astarName)),
 		container.NewHBox(legendDijkstra, legendAStar, legendBoth, legendPath),
+		container.NewBorder(nil, nil, widget.NewLabelWithStyle("Backlog", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, backlogScroll),
 		status,
 	)
 
-	backlogScroll := container.NewVScroll(backlogBody)
-	backlogPanel := container.NewBorder(
-		container.NewVBox(
-			widget.NewLabelWithStyle("Backlog", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewLabel("Tempo de cada um para alcançar o outro."),
-		),
-		nil, nil, nil,
-		backlogScroll,
-	)
-	split := container.NewHSplit(container.NewPadded(mapView), container.NewPadded(backlogPanel))
-	split.SetOffset(0.68)
-
 	w.SetContent(container.NewBorder(
-		container.NewPadded(controls),
+		controls,
 		nil, nil, nil,
-		split,
+		container.NewPadded(mapView),
 	))
 	w.ShowAndRun()
 }
@@ -242,8 +229,8 @@ func departLabel(server string, m *MapView, id string) string {
 
 func legendSwatch(label string, c color.Color) fyne.CanvasObject {
 	box := canvas.NewRectangle(c)
-	box.SetMinSize(fyne.NewSize(14, 14))
-	return container.NewHBox(box, widget.NewLabel(label), layout.NewSpacer())
+	box.SetMinSize(fyne.NewSize(10, 10))
+	return container.NewHBox(box, widget.NewLabel(label))
 }
 
 func animate(m *MapView, status *widget.Label, dijk, astar protocol.Response, errD, errA error) {
