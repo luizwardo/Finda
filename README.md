@@ -1,4 +1,4 @@
-route-finding app (map-style):** a Fyne GUI client queries **2 servers** (Dijkstra and A*) over sockets/JSON, animates the graph expansion, and highlights the best route
+
 ## How to Run
 
 ```bash
